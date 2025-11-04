@@ -1,0 +1,140 @@
+name: Build OpenWrt JDCloud RE-CS-07
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'ImmortalWrt branch'
+        required: false
+        default: 'openwrt-24.10'
+  push:
+    branches:
+      - main
+    paths:
+      - 'configs/jdcloud-re-cs-07.config'
+      - '.github/workflows/build-jdcloud-re-cs-07.yml'
+      - 'scripts/**'
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+  VIKINGYFY_URL: https://github.com/VIKINGYFY/immortalwrt
+  CONFIG_FILE: configs/jdcloud-re-cs-07.config
+  TARGET_NAME: jdcloud-re-cs-07
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Initialize Environment
+      run: |
+        sudo timedatectl set-timezone "$TZ"
+        ./scripts/ci_common.sh install_deps
+        
+    - name: Clone Source Code
+      run: |
+        ./scripts/ci_common.sh clone_source "$REPO_URL" "$REPO_BRANCH"
+        echo "克隆 VIKINGYFY 源码用于移植..."
+        git clone --depth=1 "$VIKINGYFY_URL" vikingyfy-immortalwrt
+        
+    - name: Create Port Branch & Port Device
+      run: |
+        cd immortalwrt
+        # 配置 git 用户信息（GitHub Actions 需要）
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        # 执行完整移植（包含分支创建）
+        ../scripts/port-jdcloud-re-cs-07.sh port
+        
+    - name: Apply Custom Patches
+      run: |
+        cd immortalwrt
+        echo "应用自定义补丁..."
+        sed -i 's/luci-app-cpufreq//g' target/linux/qualcommax/Makefile
+        sed -i 's/&sdhc/&sdhc_1/g' target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6010-re-cs-07.dts
+        
+        # 如果有更改，提交补丁
+        if ! git diff --quiet; then
+          git add -A
+          git commit -m "Apply custom patches for JDCloud RE-CS-07" || true
+        fi
+        
+    - name: Update and Install Feeds
+      run: |
+        cd immortalwrt
+        ../scripts/ci_common.sh update_feeds
+        
+    - name: Load Custom Configuration
+      run: |
+        cd immortalwrt
+        cp ../$CONFIG_FILE .config
+        make defconfig
+        
+    - name: Download Packages
+      run: |
+        cd immortalwrt
+        make download -j$(nproc)
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+        
+    - name: Build Firmware
+      run: |
+        cd immortalwrt
+        ../scripts/ci_build.sh build
+        
+    - name: Check Build Space
+      if: always()
+      run: df -hT
+      
+    - name: Organize Firmware Files
+      if: env.UPLOAD_FIRMWARE == 'true'
+      run: |
+        cd immortalwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y%m%d-%H%M")" >> $GITHUB_ENV
+        
+    - name: Upload Firmware to Artifact
+      if: env.UPLOAD_FIRMWARE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_${{ env.TARGET_NAME }}_${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE_PATH }}
+        
+    - name: Generate Release Tag
+      if: env.UPLOAD_RELEASE == 'true'
+      run: |
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
+        echo "## 📦 OpenWrt JDCloud RE-CS-07 固件" >> release.txt
+        echo "" >> release.txt
+        echo "### 📋 编译信息" >> release.txt
+        echo "- **编译时间**: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+        echo "- **源码分支**: ${{ env.REPO_BRANCH }}" >> release.txt
+        echo "- **固件平台**: qualcommax/ipq60xx" >> release.txt
+        echo "- **设备型号**: JDCloud RE-CS-07" >> release.txt
+        echo "" >> release.txt
+        echo "### ⚠️ 注意事项" >> release.txt
+        echo "- 此设备默认不包含无线驱动（可后续安装外置 WiFi 模块）" >> release.txt
+        echo "- 设备使用 eMMC 存储，请使用专用刷写工具" >> release.txt
+        echo "- 网络配置: LAN (lan1/lan2/lan3) + WAN" >> release.txt
+        echo "" >> release.txt
+        echo "### 📥 文件说明" >> release.txt
+        echo "- \`*-factory.bin\`: 出厂固件（首次刷写使用）" >> release.txt
+        echo "- \`*-sysupgrade.bin\`: 升级固件（系统升级使用）" >> release.txt
+        
+    - name: Upload Firmware to Release
+      if: env.UPLOAD_RELEASE == 'true'
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.TARGET_NAME }}_${{ env.RELEASE_TAG }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE_PATH }}/*

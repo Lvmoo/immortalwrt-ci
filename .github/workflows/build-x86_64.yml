@@ -1,0 +1,106 @@
+name: Build OpenWrt x86_64
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'ImmortalWrt branch'
+        required: false
+        default: 'openwrt-24.10'
+  push:
+    branches:
+      - main
+    paths:
+      - 'configs/x86_64.config'
+      - '.github/workflows/build-x86_64.yml'
+      - 'scripts/**'
+  # schedule:
+  #   - cron: '0 2 * * 0'  # 每周日 UTC 2:00
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+  CONFIG_FILE: configs/x86_64.config
+  TARGET_NAME: x86_64
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Initialize Environment
+      run: |
+        sudo timedatectl set-timezone "$TZ"
+        ./scripts/ci_common.sh install_deps
+        
+    - name: Clone Source Code
+      run: |
+        ./scripts/ci_common.sh clone_source "$REPO_URL" "$REPO_BRANCH"
+        
+    - name: Update and Install Feeds
+      run: |
+        cd immortalwrt
+        ./scripts/ci_common.sh update_feeds
+        
+    - name: Load Custom Configuration
+      run: |
+        cd immortalwrt
+        cp ../$CONFIG_FILE .config
+        make defconfig
+        
+    - name: Download Packages
+      run: |
+        cd immortalwrt
+        make download -j$(nproc)
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+        
+    - name: Build Firmware
+      run: |
+        cd immortalwrt
+        ../scripts/ci_build.sh build
+        
+    - name: Check Build Space
+      if: always()
+      run: df -hT
+      
+    - name: Organize Firmware Files
+      if: env.UPLOAD_FIRMWARE == 'true'
+      run: |
+        cd immortalwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y%m%d-%H%M")" >> $GITHUB_ENV
+        
+    - name: Upload Firmware to Artifact
+      if: env.UPLOAD_FIRMWARE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_${{ env.TARGET_NAME }}_${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE_PATH }}
+        
+    - name: Generate Release Tag
+      if: env.UPLOAD_RELEASE == 'true'
+      run: |
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
+        echo "## OpenWrt x86_64 固件" >> release.txt
+        echo "### 编译信息" >> release.txt
+        echo "- 编译时间: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+        echo "- 源码分支: ${{ env.REPO_BRANCH }}" >> release.txt
+        echo "- 固件架构: x86_64" >> release.txt
+        
+    - name: Upload Firmware to Release
+      if: env.UPLOAD_RELEASE == 'true'
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.TARGET_NAME }}_${{ env.RELEASE_TAG }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE_PATH }}/*
