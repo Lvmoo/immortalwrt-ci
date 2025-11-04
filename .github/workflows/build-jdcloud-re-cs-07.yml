@@ -33,14 +33,19 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       
+    - name: Set Script Permissions
+      run: |
+        chmod +x scripts/*.sh
+        ls -la scripts/
+        
     - name: Initialize Environment
       run: |
         sudo timedatectl set-timezone "$TZ"
-        ./scripts/ci_common.sh install_deps
+        bash scripts/ci_common.sh install_deps
         
     - name: Clone Source Code
       run: |
-        ./scripts/ci_common.sh clone_source "$REPO_URL" "$REPO_BRANCH"
+        bash scripts/ci_common.sh clone_source "$REPO_URL" "$REPO_BRANCH"
         echo "克隆 VIKINGYFY 源码用于移植..."
         git clone --depth=1 "$VIKINGYFY_URL" vikingyfy-immortalwrt
         
@@ -51,7 +56,7 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         # 执行完整移植（包含分支创建）
-        ../scripts/port-jdcloud-re-cs-07.sh port
+        bash ../scripts/port-jdcloud-re-cs-07.sh port
         
     - name: Apply Custom Patches
       run: |
@@ -69,7 +74,7 @@ jobs:
     - name: Update and Install Feeds
       run: |
         cd immortalwrt
-        ../scripts/ci_common.sh update_feeds
+        bash ../scripts/ci_common.sh update_feeds
         
     - name: Load Custom Configuration
       run: |
@@ -87,7 +92,7 @@ jobs:
     - name: Build Firmware
       run: |
         cd immortalwrt
-        ../scripts/ci_build.sh build
+        bash ../scripts/ci_build.sh build
         
     - name: Check Build Space
       if: always()

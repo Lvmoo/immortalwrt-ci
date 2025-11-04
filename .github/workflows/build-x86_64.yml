@@ -14,8 +14,6 @@ on:
       - 'configs/x86_64.config'
       - '.github/workflows/build-x86_64.yml'
       - 'scripts/**'
-  # schedule:
-  #   - cron: '0 2 * * 0'  # 每周日 UTC 2:00
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
@@ -34,19 +32,24 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       
+    - name: Set Script Permissions
+      run: |
+        chmod +x scripts/*.sh
+        ls -la scripts/
+        
     - name: Initialize Environment
       run: |
         sudo timedatectl set-timezone "$TZ"
-        ./scripts/ci_common.sh install_deps
+        bash scripts/ci_common.sh install_deps
         
     - name: Clone Source Code
       run: |
-        ./scripts/ci_common.sh clone_source "$REPO_URL" "$REPO_BRANCH"
+        bash scripts/ci_common.sh clone_source "$REPO_URL" "$REPO_BRANCH"
         
     - name: Update and Install Feeds
       run: |
         cd immortalwrt
-        ./scripts/ci_common.sh update_feeds
+        bash ../scripts/ci_common.sh update_feeds
         
     - name: Load Custom Configuration
       run: |
@@ -64,7 +67,7 @@ jobs:
     - name: Build Firmware
       run: |
         cd immortalwrt
-        ../scripts/ci_build.sh build
+        bash ../scripts/ci_build.sh build
         
     - name: Check Build Space
       if: always()
