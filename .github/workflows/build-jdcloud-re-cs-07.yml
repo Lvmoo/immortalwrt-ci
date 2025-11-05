@@ -83,53 +83,6 @@ jobs:
         git checkout ${{ github.ref_name }}
         mkdir -p porting/jdcloud-re-cs-07
         cp patches/jdcloud-re-cs-07-port.patch porting/jdcloud-re-cs-07/ 2>/dev/null || true
-        cat > porting/jdcloud-re-cs-07/README.md << 'EOFREADME'
-# JDCloud RE-CS-07 移植文档
-
-## 完整源码分支
-
-移植后的完整 ImmortalWrt 源码位于本仓库的独立分支 `immortalwrt-jdcloud-re-cs-07`
-
-## 方法 1: 直接使用移植分支（推荐）
-
-克隆移植分支（完整源码）：
-```bash
-git clone -b immortalwrt-jdcloud-re-cs-07 https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
-./scripts/feeds update -a
-./scripts/feeds install -a
-make menuconfig
-make download -j$(nproc)
-make -j$(nproc) || make -j1 V=s
-```
-
-## 方法 2: 应用补丁到官方源码
-
-```bash
-git clone -b openwrt-24.10 https://github.com/immortalwrt/immortalwrt
-cd immortalwrt
-wget https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/porting/jdcloud-re-cs-07/jdcloud-re-cs-07-port.patch
-git apply jdcloud-re-cs-07-port.patch
-./scripts/feeds update -a
-./scripts/feeds install -a
-make menuconfig
-```
-
-## 设备信息
-
-- **厂商**: JDCloud
-- **型号**: RE-CS-07
-- **SoC**: Qualcomm IPQ6010
-- **存储**: eMMC
-- **网络**: 4x GbE (3x LAN + 1x WAN)
-
-## 关键修改
-
-1. DTS 修复: `&sdhc` → `&sdhc_1`
-2. 网络配置: LAN (lan1/lan2/lan3) + WAN
-3. eMMC 升级支持
-4. 清理冲突包
-EOFREADME
 
     - name: Commit to Main Branch
       run: |
