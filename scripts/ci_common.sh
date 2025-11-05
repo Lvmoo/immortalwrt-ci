@@ -44,7 +44,8 @@ clone_source() {
         rm -rf immortalwrt
     fi
     
-    git clone --depth=1 -b "$repo_branch" "$repo_url" immortalwrt
+    #git clone --depth=1 -b "$repo_branch" "$repo_url" immortalwrt
+    git clone -b "$repo_branch" "$repo_url" immortalwrt
     
     log_info "源码克隆完成"
 }
