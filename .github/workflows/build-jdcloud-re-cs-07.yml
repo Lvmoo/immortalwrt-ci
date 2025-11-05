@@ -148,36 +148,6 @@ jobs:
       if: env.UPLOAD_RELEASE == 'true'
       run: |
         echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
-        cat > release.txt << 'EOFRELEASE'
-## 📦 OpenWrt JDCloud RE-CS-07 固件
-
-### 📋 编译信息
-- 编译时间: BUILD_DATE
-- 源码分支: openwrt-24.10
-- 固件平台: qualcommax/ipq60xx
-- 设备型号: JDCloud RE-CS-07
-
-### 🔗 完整源码
-[immortalwrt-jdcloud-re-cs-07 分支](SOURCE_BRANCH_URL)
-
-### 📝 关键修复
-- ✅ DTS 修复 (`&sdhc` → `&sdhc_1`)
-- ✅ 网络配置 (LAN: lan1/lan2/lan3, WAN: wan)
-- ✅ eMMC 升级支持
-
-### 📥 文件说明
-- `*-factory.bin`: 出厂固件（首次刷写）
-- `*-sysupgrade.bin`: 升级固件（系统升级）
-- `jdcloud-re-cs-07-port.patch`: 移植补丁
-
-### 🛠️ 快速编译
-```bash
-git clone -b immortalwrt-jdcloud-re-cs-07 CLONE_URL
-cd REPO_DIR
-./scripts/feeds update -a && ./scripts/feeds install -a
-make menuconfig && make -j$(nproc)
-```
-EOFRELEASE
         sed -i "s|BUILD_DATE|$(date +'%Y-%m-%d %H:%M:%S')|g" release.txt
         sed -i "s|SOURCE_BRANCH_URL|${{ github.server_url }}/${{ github.repository }}/tree/${{ env.PORTING_BRANCH }}|g" release.txt
         sed -i "s|CLONE_URL|${{ github.server_url }}/${{ github.repository }}.git|g" release.txt
