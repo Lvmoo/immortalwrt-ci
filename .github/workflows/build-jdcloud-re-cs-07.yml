@@ -83,7 +83,6 @@ jobs:
         git checkout ${{ github.ref_name }}
         mkdir -p porting/jdcloud-re-cs-07
         cp patches/jdcloud-re-cs-07-port.patch porting/jdcloud-re-cs-07/ 2>/dev/null || true
-
         cat > porting/jdcloud-re-cs-07/README.md << 'EOFREADME'
 # JDCloud RE-CS-07 移植文档
 
@@ -93,120 +92,63 @@ jobs:
 
 ## 方法 1: 直接使用移植分支（推荐）
 
-### 克隆移植分支（完整源码）
-
+克隆移植分支（完整源码）：
 ```bash
 git clone -b immortalwrt-jdcloud-re-cs-07 https://github.com/YOUR_USERNAME/YOUR_REPO.git
 cd YOUR_REPO
-```
-
-### 更新 feeds
-
-```bash
 ./scripts/feeds update -a
 ./scripts/feeds install -a
-```
-
-### 配置
-
-```bash
 make menuconfig
-```
-
-或使用预设配置：
-
-```bash
-wget https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/configs/jdcloud-re-cs-07.config -O .config
-make defconfig
-```
-
-### 编译
-
-```bash
 make download -j$(nproc)
 make -j$(nproc) || make -j1 V=s
 ```
 
 ## 方法 2: 应用补丁到官方源码
 
-### 克隆官方源码
-
 ```bash
 git clone -b openwrt-24.10 https://github.com/immortalwrt/immortalwrt
 cd immortalwrt
-```
-
-### 下载并应用补丁
-
-```bash
 wget https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/porting/jdcloud-re-cs-07/jdcloud-re-cs-07-port.patch
 git apply jdcloud-re-cs-07-port.patch
-```
-
-### 后续步骤
-
-```bash
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 make menuconfig
 ```
 
-## 移植详情
-
-### 设备信息
+## 设备信息
 
 - **厂商**: JDCloud
 - **型号**: RE-CS-07
 - **SoC**: Qualcomm IPQ6010
 - **存储**: eMMC
 - **网络**: 4x GbE (3x LAN + 1x WAN)
-- **无线**: 默认不包含
 
-### 关键修改
+## 关键修改
 
-1. ✅ **DTS 修复**: 将 `&sdhc` 改为 `&sdhc_1`
-2. ✅ **设备配置**: 添加到 `target/linux/qualcommax/image/ipq60xx.mk`
-3. ✅ **网络配置**: LAN (lan1/lan2/lan3) + WAN
-4. ✅ **eMMC 支持**: 升级脚本配置
-5. ✅ **清理冲突**: 移除 luci-app-cpufreq
-
-### 文件位置
-
-```
-target/linux/qualcommax/
-├── files/arch/arm64/boot/dts/qcom/
-│   ├── ipq6010-re-cs-07.dts
-│   ├── ipq6018-ess.dtsi
-│   ├── ipq6018-nss.dtsi
-│   └── ipq6018-common.dtsi
-├── image/ipq60xx.mk
-├── ipq60xx/base-files/
-│   ├── etc/board.d/02_network
-│   └── lib/upgrade/platform.sh
-└── Makefile
-```
-
-## 相关链接
-
-- [完整源码分支](../../tree/immortalwrt-jdcloud-re-cs-07)
-- [补丁文件](jdcloud-re-cs-07-port.patch)
-- [配置文件](../../blob/main/configs/jdcloud-re-cs-07.config)
-- [固件下载](../../releases)
-- [官方 ImmortalWrt](https://github.com/immortalwrt/immortalwrt)
+1. DTS 修复: `&sdhc` → `&sdhc_1`
+2. 网络配置: LAN (lan1/lan2/lan3) + WAN
+3. eMMC 升级支持
+4. 清理冲突包
 EOFREADME
 
     - name: Commit to Main Branch
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add porting/ patches/
-        git diff --cached --quiet || git commit -m "Update porting info [skip ci]" && git push origin ${{ github.ref_name }}
+        git add porting/ patches/ || true
+        if ! git diff --cached --quiet 2>/dev/null; then
+          git commit -m "Update porting info [skip ci]"
+          git push origin ${{ github.ref_name }}
+        else
+          echo "No changes to commit"
+        fi
 
     - name: Upload Patch Artifact
       uses: actions/upload-artifact@v4
       with:
         name: patch_${{ github.run_number }}
         path: patches/jdcloud-re-cs-07-port.patch
+        if-no-files-found: warn
 
     - name: Update and Install Feeds
       run: |
@@ -269,12 +211,6 @@ EOFREADME
 - ✅ DTS 修复 (`&sdhc` → `&sdhc_1`)
 - ✅ 网络配置 (LAN: lan1/lan2/lan3, WAN: wan)
 - ✅ eMMC 升级支持
-- ✅ 清理冲突包
-
-### ⚠️ 注意事项
-- 设备默认不包含无线驱动
-- 使用 eMMC 存储，需专用刷写工具
-- 网络配置: LAN (lan1/lan2/lan3) + WAN
 
 ### 📥 文件说明
 - `*-factory.bin`: 出厂固件（首次刷写）
@@ -282,7 +218,6 @@ EOFREADME
 - `jdcloud-re-cs-07-port.patch`: 移植补丁
 
 ### 🛠️ 快速编译
-
 ```bash
 git clone -b immortalwrt-jdcloud-re-cs-07 CLONE_URL
 cd REPO_DIR
