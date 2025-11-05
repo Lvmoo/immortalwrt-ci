@@ -21,6 +21,7 @@ env:
   VIKINGYFY_URL: https://github.com/VIKINGYFY/immortalwrt
   CONFIG_FILE: configs/jdcloud-re-cs-07.config
   TARGET_NAME: jdcloud-re-cs-07
+  PORTING_BRANCH: immortalwrt-jdcloud-re-cs-07
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
@@ -32,6 +33,9 @@ jobs:
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
       
     - name: Set Script Permissions
       run: |
@@ -49,27 +53,129 @@ jobs:
         echo "克隆 VIKINGYFY 源码用于移植..."
         git clone --depth=1 "$VIKINGYFY_URL" vikingyfy-immortalwrt
         
-    - name: Create Port Branch & Port Device
+    - name: Port Device to ImmortalWrt
       run: |
         cd immortalwrt
-        # 配置 git 用户信息（GitHub Actions 需要）
+        # 配置 git 用户信息
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        # 执行完整移植（包含分支创建）
+        
+        # 执行完整移植（包含所有修复）
         bash ../scripts/port-jdcloud-re-cs-07.sh port
         
-    - name: Apply Custom Patches
+    - name: Save Porting Files to Repository
       run: |
-        cd immortalwrt
-        echo "应用自定义补丁..."
-        sed -i 's/luci-app-cpufreq//g' target/linux/qualcommax/Makefile
-        sed -i 's/&sdhc/&sdhc_1/g' target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6010-re-cs-07.dts
+        # 创建移植文件目录
+        mkdir -p porting/jdcloud-re-cs-07/{dts,image,base-files}
         
-        # 如果有更改，提交补丁
-        if ! git diff --quiet; then
-          git add -A
-          git commit -m "Apply custom patches for JDCloud RE-CS-07" || true
+        # 复制 DTS 文件
+        cp immortalwrt/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6010-re-cs-07.dts \
+           porting/jdcloud-re-cs-07/dts/ || true
+        cp immortalwrt/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6018-*.dtsi \
+           porting/jdcloud-re-cs-07/dts/ 2>/dev/null || true
+        
+        # 复制 Image 配置
+        sed -n '/define Device\/jdcloud_re-cs-07/,/TARGET_DEVICES += jdcloud_re-cs-07/p' \
+           immortalwrt/target/linux/qualcommax/image/ipq60xx.mk \
+           > porting/jdcloud-re-cs-07/image/device-config.mk || true
+        
+        # 复制 base-files 配置
+        mkdir -p porting/jdcloud-re-cs-07/base-files
+        grep -A 2 "jdcloud,re-cs-07" \
+           immortalwrt/target/linux/qualcommax/ipq60xx/base-files/etc/board.d/02_network \
+           > porting/jdcloud-re-cs-07/base-files/network-config.txt 2>/dev/null || true
+        grep -A 4 "jdcloud,re-cs-07" \
+           immortalwrt/target/linux/qualcommax/ipq60xx/base-files/lib/upgrade/platform.sh \
+           > porting/jdcloud-re-cs-07/base-files/upgrade-config.txt 2>/dev/null || true
+        
+        # 创建 README
+        cat > porting/jdcloud-re-cs-07/README.md << 'EOF'
+# JDCloud RE-CS-07 移植文件
+
+本目录包含 JDCloud RE-CS-07 设备移植到官方 ImmortalWrt 所需的文件。
+
+## 目录结构
+
+- `dts/` - 设备树文件（已修复 sdhc_1 引用）
+- `image/` - Image Makefile 配置
+- `base-files/` - 基础文件配置（网络、升级脚本等）
+
+## 关键修改
+
+1. **DTS 修复**: 将 `&sdhc` 改为 `&sdhc_1`
+2. **网络配置**: LAN (lan1/lan2/lan3) + WAN
+3. **eMMC 支持**: 升级脚本配置
+
+## 使用方法
+
+### 方法 1: 应用补丁
+git clone -b ${{ env.REPO_BRANCH }} https://github.com/immortalwrt/immortalwrt
+cd immortalwrt
+git apply ../patches/jdcloud-re-cs-07-port.patch
+
+### 方法 2: 手动复制文件
+参考 `porting/jdcloud-re-cs-07/` 目录中的文件结构
+
+## 自动生成信息
+
+- 生成时间: $(date +"%Y-%m-%d %H:%M:%S")
+- 源码分支: ${{ env.REPO_BRANCH }}
+- 工作流: #${{ github.run_number }}
+EOF
+        
+        echo "✅ 移植文件已保存"
+        
+    - name: Upload Patch File
+      uses: actions/upload-artifact@v4
+      with:
+        name: jdcloud-re-cs-07-patch_${{ github.run_number }}
+        path: patches/jdcloud-re-cs-07-port.patch
+        if-no-files-found: warn
+        
+    - name: Commit and Push Porting Branch
+      run: |
+        # 配置 git
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # 检查并切换到移植分支
+        if git rev-parse --verify ${{ env.PORTING_BRANCH }} >/dev/null 2>&1; then
+          echo "分支已存在，切换并合并"
+          git checkout ${{ env.PORTING_BRANCH }}
+          git merge ${{ github.ref_name }} --no-edit -X theirs || echo "合并冲突，使用当前更改"
+        else
+          echo "创建新分支"
+          git checkout -b ${{ env.PORTING_BRANCH }}
         fi
+        
+        # 添加移植文件
+        git add porting/ patches/ || true
+        
+        # 检查是否有更改
+        if ! git diff --cached --quiet 2>/dev/null; then
+          git commit -m "Update JDCloud RE-CS-07 porting files
+
+Workflow run: #${{ github.run_number }}
+ImmortalWrt branch: ${{ env.REPO_BRANCH }}
+Build date: $(date +"%Y-%m-%d %H:%M:%S")
+
+Changes:
+- Update device tree files (with sdhc_1 fix)
+- Update image configuration
+- Update base-files configuration
+- Update porting patch file
+" || echo "提交失败，可能没有更改"
+          
+          # 推送到远程
+          git push origin ${{ env.PORTING_BRANCH }} --force || echo "推送失败"
+          
+          echo "✅ 移植分支已更新: ${{ github.server_url }}/${{ github.repository }}/tree/${{ env.PORTING_BRANCH }}"
+        else
+          echo "没有更改需要提交"
+        fi
+        
+        # 切换回主分支继续构建
+        git checkout ${{ github.ref_name }}
         
     - name: Update and Install Feeds
       run: |
@@ -117,22 +223,49 @@ jobs:
       if: env.UPLOAD_RELEASE == 'true'
       run: |
         echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
-        echo "## 📦 OpenWrt JDCloud RE-CS-07 固件" >> release.txt
-        echo "" >> release.txt
-        echo "### 📋 编译信息" >> release.txt
-        echo "- **编译时间**: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
-        echo "- **源码分支**: ${{ env.REPO_BRANCH }}" >> release.txt
-        echo "- **固件平台**: qualcommax/ipq60xx" >> release.txt
-        echo "- **设备型号**: JDCloud RE-CS-07" >> release.txt
-        echo "" >> release.txt
-        echo "### ⚠️ 注意事项" >> release.txt
-        echo "- 此设备默认不包含无线驱动（可后续安装外置 WiFi 模块）" >> release.txt
-        echo "- 设备使用 eMMC 存储，请使用专用刷写工具" >> release.txt
-        echo "- 网络配置: LAN (lan1/lan2/lan3) + WAN" >> release.txt
-        echo "" >> release.txt
-        echo "### 📥 文件说明" >> release.txt
-        echo "- \`*-factory.bin\`: 出厂固件（首次刷写使用）" >> release.txt
-        echo "- \`*-sysupgrade.bin\`: 升级固件（系统升级使用）" >> release.txt
+        
+        cat > release.txt << EOF
+## 📦 OpenWrt JDCloud RE-CS-07 固件
+
+### 📋 编译信息
+- **编译时间**: $(date +"%Y-%m-%d %H:%M:%S")
+- **源码分支**: ${{ env.REPO_BRANCH }}
+- **固件平台**: qualcommax/ipq60xx
+- **设备型号**: JDCloud RE-CS-07
+- **工作流**: #${{ github.run_number }}
+
+### 🔗 移植分支
+移植文件已保存到仓库分支: [${{ env.PORTING_BRANCH }}](${{ github.server_url }}/${{ github.repository }}/tree/${{ env.PORTING_BRANCH }})
+
+### 📝 关键修复
+- ✅ 修复 DTS 中的 sdhc 引用 (\`&sdhc\` → \`&sdhc_1\`)
+- ✅ 配置网络接口 (LAN: lan1/lan2/lan3, WAN: wan)
+- ✅ 配置 eMMC 升级脚本
+- ✅ 移除冲突的 luci-app-cpufreq
+
+### ⚠️ 注意事项
+- 此设备默认不包含无线驱动（可后续安装外置 WiFi 模块）
+- 设备使用 eMMC 存储，请使用专用刷写工具
+- 网络配置: LAN (lan1/lan2/lan3) + WAN
+
+### 📥 文件说明
+- \`*-factory.bin\`: 出厂固件（首次刷写使用）
+- \`*-sysupgrade.bin\`: 升级固件（系统升级使用）
+- \`jdcloud-re-cs-07-port.patch\`: 移植补丁文件
+
+### 🛠️ 手动应用移植
+\`\`\`bash
+# 克隆官方源码
+git clone -b ${{ env.REPO_BRANCH }} https://github.com/immortalwrt/immortalwrt
+cd immortalwrt
+
+# 下载并应用补丁
+curl -L "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ env.TARGET_NAME }}_\${RELEASE_TAG}/jdcloud-re-cs-07-port.patch" | git apply
+
+# 或查看移植分支中的文件
+# ${{ github.server_url }}/${{ github.repository }}/tree/${{ env.PORTING_BRANCH }}/porting/jdcloud-re-cs-07
+\`\`\`
+EOF
         
     - name: Upload Firmware to Release
       if: env.UPLOAD_RELEASE == 'true'
@@ -142,4 +275,6 @@ jobs:
       with:
         tag_name: ${{ env.TARGET_NAME }}_${{ env.RELEASE_TAG }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE_PATH }}/*
+        files: |
+          ${{ env.FIRMWARE_PATH }}/*
+          patches/jdcloud-re-cs-07-port.patch
