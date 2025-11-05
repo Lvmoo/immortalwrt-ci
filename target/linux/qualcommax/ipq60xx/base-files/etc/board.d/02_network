@@ -26,6 +26,9 @@ ipq60xx_setup_interfaces()
 	*)
 		echo "Unsupported hardware. Network interfaces not initialized"
 		;;
+	jdcloud,re-cs-07)
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"
+		;;
 	esac
 }
 

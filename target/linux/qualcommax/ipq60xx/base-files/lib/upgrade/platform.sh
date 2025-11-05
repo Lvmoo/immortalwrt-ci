@@ -33,6 +33,11 @@ EOF
 
 platform_do_upgrade() {
 	case "$(board_name)" in
+	jdcloud,re-cs-07)
+		CI_KERNPART="0:HLOS"
+		CI_ROOTPART="rootfs"
+		emmc_do_upgrade "$1"
+		;;
 	cambiumnetworks,xe3-4)
 		fw_setenv bootcount 0
 		nand_do_upgrade "$1"
@@ -54,6 +59,14 @@ platform_do_upgrade() {
 		;;
 	*)
 		default_do_upgrade "$1"
+		;;
+	esac
+}
+
+platform_copy_config() {
+	case "$(board_name)" in
+	jdcloud,re-cs-07)
+		emmc_copy_config
 		;;
 	esac
 }
