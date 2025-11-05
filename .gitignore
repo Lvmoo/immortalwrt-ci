@@ -1,0 +1,29 @@
+# 编译临时目录（只在主分支生效）
+/immortalwrt/
+/vikingyfy-immortalwrt/
+
+# 编译产物
+*.bin
+*.img
+*.img.gz
+*.vmdk
+*.iso
+
+# 临时文件
+*.log
+*.tmp
+*~
+.DS_Store
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 但保留这些目录
+!/porting/
+!/patches/
+!/configs/
+!/scripts/
+!/.github/
