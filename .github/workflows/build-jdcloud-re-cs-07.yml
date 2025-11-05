@@ -14,6 +14,10 @@ on:
       - 'configs/jdcloud-re-cs-07.config'
       - '.github/workflows/build-jdcloud-re-cs-07.yml'
       - 'scripts/**'
+      
+permissions:
+  contents: write
+  pull-requests: write
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
