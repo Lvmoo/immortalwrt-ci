@@ -1,0 +1,172 @@
+name: Build OpenWrt JDCloud RE-CS-07 (LiBwrt NSS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'LiBwrt NSS branch'
+        required: false
+        default: 'k6.12-nss'
+        type: choice
+        options:
+          - 'k6.12-nss'
+          - 'k6.6-nss'
+  push:
+    branches:
+      - main
+    paths:
+      - 'configs/jdcloud-re-cs-07-nss.config'
+      - '.github/workflows/build-jdcloud-re-cs-07-nss.yml'
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/LiBwrt/openwrt-6.x
+  REPO_BRANCH: k6.12-nss
+  CONFIG_FILE: configs/jdcloud-re-cs-07.config
+  TARGET_NAME: jdcloud-re-cs-07-libwrt-nss
+  PORTING_BRANCH: libwrt-jdcloud-re-cs-07-nss
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Initialize Environment
+      run: |
+        sudo timedatectl set-timezone "$TZ"
+        sudo apt update -y
+        sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib \
+          gettext git libncurses-dev libssl-dev python3-distutils rsync unzip \
+          zlib1g-dev file wget ccache
+        
+    - name: Restore Build Cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          openwrt/.ccache
+          openwrt/dl
+          openwrt/staging_dir/host
+          openwrt/staging_dir/hostpkg
+          openwrt/staging_dir/toolchain-*
+        key: libwrt-build-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        restore-keys: |
+          libwrt-build-${{ env.REPO_BRANCH }}-
+          libwrt-build-
+          
+    - name: Clone LiBwrt Source
+      run: |
+        echo "🚀 克隆 LiBwrt/openwrt-6.x ($REPO_BRANCH)..."
+        git clone --single-branch -b "$REPO_BRANCH" "$REPO_URL" openwrt
+        cd openwrt
+        echo "✅ 源码信息:"
+        echo "  分支: $(git branch --show-current)"
+        echo "  提交: $(git log -1 --oneline)"
+        
+    - name: Push Source to Porting Branch
+      run: |
+        cd openwrt
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git remote add current "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+        git fetch current || true
+        
+        echo "📤 推送源码到分支: ${{ env.PORTING_BRANCH }}"
+        git push current HEAD:${{ env.PORTING_BRANCH }} --force
+        echo "✅ 源码已推送"
+        
+    - name: Generate and Commit Documentation
+      run: |
+        chmod +x scripts/generate-readme-libwrt.sh
+        bash scripts/generate-readme-libwrt.sh "${{ github.server_url }}/${{ github.repository }}" "${{ env.PORTING_BRANCH }}"
+        
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add porting/ || true
+        git diff --cached --quiet || git commit -m "Update LiBwrt NSS documentation [skip ci]"
+        git push origin HEAD:${{ github.ref_name }} || true
+        
+    - name: Setup CCH and Feeds
+      run: |
+        cd openwrt
+        mkdir -p .ccache
+        export CCACHE_DIR=$(pwd)/.ccache
+        ccache --set-config=max_size=10G
+        ccache --set-config=compression=true
+        
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+    - name: Load Configuration
+      run: |
+        cd openwrt
+        if [ -f "../$CONFIG_FILE" ]; then
+          cp ../$CONFIG_FILE .config
+        else
+          echo "CONFIG_TARGET_qualcommax=y" > .config
+          echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
+          echo "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-07=y" >> .config
+          echo "CONFIG_PACKAGE_luci=y" >> .config
+        fi
+        make defconfig
+        
+    - name: Download and Build
+      run: |
+        cd openwrt
+        export CCACHE_DIR=$(pwd)/.ccache
+        export USE_CCACHE=1
+        make download -j$(nproc) V=s
+        find dl -size -1024c -delete
+        make -j$(($(nproc) + 1)) V=s || make -j1 V=s
+        
+    - name: Save Build Cache
+      uses: actions/cache/save@v4
+      if: always()
+      with:
+        path: |
+          openwrt/.ccache
+          openwrt/dl
+          openwrt/staging_dir/host
+          openwrt/staging_dir/hostpkg
+          openwrt/staging_dir/toolchain-*
+        key: libwrt-build-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        
+    - name: Organize Firmware
+      if: env.UPLOAD_FIRMWARE == 'true'
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y%m%d-%H%M")" >> $GITHUB_ENV
+        
+    - name: Upload Firmware Artifact
+      if: env.UPLOAD_FIRMWARE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-libwrt-nss_${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE_PATH }}
+        
+    - name: Generate and Upload Release
+      if: env.UPLOAD_RELEASE == 'true'
+      run: |
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
+        chmod +x scripts/generate-release-libwrt.sh
+        bash scripts/generate-release-libwrt.sh "${{ github.server_url }}/${{ github.repository }}" "${{ env.PORTING_BRANCH }}" "$(date +'%Y-%m-%d %H:%M:%S')"
+        
+    - name: Upload Release
+      if: env.UPLOAD_RELEASE == 'true'
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.TARGET_NAME }}_${{ env.RELEASE_TAG }}
+        name: LiBwrt NSS ${{ env.RELEASE_TAG }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE_PATH }}/*
