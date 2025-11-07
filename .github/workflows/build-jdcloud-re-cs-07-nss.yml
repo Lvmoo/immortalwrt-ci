@@ -39,36 +39,55 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
       
+    - name: Free Disk Space
+      run: |
+        echo "清理前磁盘空间:"
+        df -h
+        
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        
+        echo "清理后磁盘空间:"
+        df -h
+        
     - name: Initialize Environment
       run: |
         sudo timedatectl set-timezone "$TZ"
-        sudo apt update -y
-        sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib \
-          gettext git libncurses-dev libssl-dev python3-distutils rsync unzip \
-          zlib1g-dev file wget ccache
+        bash scripts/ci_common.sh install_deps
         
-    - name: Restore Build Cache
-      uses: actions/cache/restore@v4
-      with:
-        path: |
-          openwrt/.ccache
-          openwrt/dl
-          openwrt/staging_dir/host
-          openwrt/staging_dir/hostpkg
-          openwrt/staging_dir/toolchain-*
-        key: libwrt-build-${{ env.REPO_BRANCH }}-${{ github.sha }}
-        restore-keys: |
-          libwrt-build-${{ env.REPO_BRANCH }}-
-          libwrt-build-
-          
     - name: Clone LiBwrt Source
       run: |
         echo "🚀 克隆 LiBwrt/openwrt-6.x ($REPO_BRANCH)..."
         git clone --single-branch -b "$REPO_BRANCH" "$REPO_URL" openwrt
+        
         cd openwrt
         echo "✅ 源码信息:"
         echo "  分支: $(git branch --show-current)"
         echo "  提交: $(git log -1 --oneline)"
+        
+    - name: Restore DL Cache
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/dl
+        key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        restore-keys: |
+          dl-${{ env.REPO_BRANCH }}-
+          dl-
+          
+    - name: Restore Staging Cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          openwrt/staging_dir/host
+          openwrt/staging_dir/hostpkg
+          openwrt/staging_dir/toolchain-*
+        key: staging-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/include/version.mk') }}
+        restore-keys: |
+          staging-${{ env.REPO_BRANCH }}-
+          staging-
         
     - name: Push Source to Porting Branch
       run: |
@@ -80,11 +99,9 @@ jobs:
         
         echo "📤 推送源码到分支: ${{ env.PORTING_BRANCH }}"
         git push current HEAD:${{ env.PORTING_BRANCH }} --force
-        echo "✅ 源码已推送"
         
     - name: Generate and Commit Documentation
       run: |
-        chmod +x scripts/generate-readme-libwrt.sh
         bash scripts/generate-readme-libwrt.sh "${{ github.server_url }}/${{ github.repository }}" "${{ env.PORTING_BRANCH }}"
         
         git config user.name "github-actions[bot]"
@@ -93,14 +110,9 @@ jobs:
         git diff --cached --quiet || git commit -m "Update LiBwrt NSS documentation [skip ci]"
         git push origin HEAD:${{ github.ref_name }} || true
         
-    - name: Setup CCH and Feeds
+    - name: Setup Feeds
       run: |
         cd openwrt
-        mkdir -p .ccache
-        export CCACHE_DIR=$(pwd)/.ccache
-        ccache --set-config=max_size=10G
-        ccache --set-config=compression=true
-        
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         
@@ -108,8 +120,10 @@ jobs:
       run: |
         cd openwrt
         if [ -f "../$CONFIG_FILE" ]; then
+          echo "📋 使用自定义配置"
           cp ../$CONFIG_FILE .config
         else
+          echo "⚠️ 使用默认配置"
           echo "CONFIG_TARGET_qualcommax=y" > .config
           echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
           echo "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-07=y" >> .config
@@ -117,26 +131,44 @@ jobs:
         fi
         make defconfig
         
-    - name: Download and Build
+    - name: Download Dependencies
       run: |
         cd openwrt
-        export CCACHE_DIR=$(pwd)/.ccache
-        export USE_CCACHE=1
+        echo "📥 下载依赖包..."
         make download -j$(nproc) V=s
         find dl -size -1024c -delete
-        make -j$(($(nproc) + 1)) V=s || make -j1 V=s
         
-    - name: Save Build Cache
+    - name: Build Firmware
+      run: |
+        cd openwrt
+        echo "🔨 开始编译..."
+        make -j$(($(nproc) + 1)) || make -j1 V=s
+        
+    - name: Show Build Stats
+      if: always()
+      run: |
+        cd openwrt
+        echo "📊 构建目录大小:"
+        du -sh build_dir dl staging_dir tmp bin 2>/dev/null || true
+        echo "📊 磁盘使用:"
+        df -h
+        
+    - name: Save DL Cache
+      uses: actions/cache/save@v4
+      if: always()
+      with:
+        path: openwrt/dl
+        key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        
+    - name: Save Staging Cache
       uses: actions/cache/save@v4
       if: always()
       with:
         path: |
-          openwrt/.ccache
-          openwrt/dl
           openwrt/staging_dir/host
           openwrt/staging_dir/hostpkg
           openwrt/staging_dir/toolchain-*
-        key: libwrt-build-${{ env.REPO_BRANCH }}-${{ github.sha }}
+        key: staging-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/include/version.mk') }}
         
     - name: Organize Firmware
       if: env.UPLOAD_FIRMWARE == 'true'
@@ -153,11 +185,10 @@ jobs:
         name: firmware-libwrt-nss_${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE_PATH }}
         
-    - name: Generate and Upload Release
+    - name: Generate Release Info
       if: env.UPLOAD_RELEASE == 'true'
       run: |
         echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
-        chmod +x scripts/generate-release-libwrt.sh
         bash scripts/generate-release-libwrt.sh "${{ github.server_url }}/${{ github.repository }}" "${{ env.PORTING_BRANCH }}" "$(date +'%Y-%m-%d %H:%M:%S')"
         
     - name: Upload Release
