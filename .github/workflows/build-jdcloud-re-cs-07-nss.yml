@@ -14,7 +14,7 @@ on:
       use_ccache:
         description: 'Enable ccache'
         required: false
-        default: true
+        default: false
         type: boolean
       clean_cache:
         description: 'Clean all caches'
@@ -40,11 +40,10 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  # 缓存版本号 - 手动修改此版本号可强制刷新所有缓存
+  # 缓存版本 - 如遇问题改成 v3、v4 强制刷新
   CACHE_VERSION: v2
-  # ccache 配置
-  USE_CCACHE: ${{ github.event.inputs.use_ccache || 'true' }}
-  CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
+  # ccache 配置（默认关闭，社区建议按需启用）
+  USE_CCACHE: ${{ github.event.inputs.use_ccache || 'false' }}
 
 jobs:
   build:
@@ -83,33 +82,38 @@ jobs:
         echo "  分支: $(git branch --show-current)"
         echo "  提交: $(git log -1 --oneline)"
         
-        # 生成缓存键相关的哈希
+        # 生成缓存键
         OPENWRT_COMMIT=$(git rev-parse --short HEAD)
         echo "OPENWRT_COMMIT=$OPENWRT_COMMIT" >> $GITHUB_ENV
         
-        # 生成 kernel 版本哈希用于 ccache 键
-        KERNEL_HASH=$(md5sum include/kernel-* 2>/dev/null | awk '{ print $1 }' | md5sum | awk '{ print $1 }' || echo "default")
-        echo "KERNEL_HASH=$KERNEL_HASH" >> $GITHUB_ENV
+        # 生成工具链特征码（用于缓存键）
+        TOOLCHAIN_HASH=$(cat include/toolchain-build.mk include/kernel-*.mk 2>/dev/null | md5sum | awk '{ print $1 }')
+        echo "TOOLCHAIN_HASH=$TOOLCHAIN_HASH" >> $GITHUB_ENV
         
+    # 缓存 1: DL 目录（排除 go-mod-cache）
     - name: Restore DL Cache
       if: github.event.inputs.clean_cache != 'true'
       uses: actions/cache/restore@v4
       with:
-        path: openwrt/dl
+        path: |
+          openwrt/dl
+          !openwrt/dl/go-mod-cache
         key: dl-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds.conf.default') }}
         restore-keys: |
           dl-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
           
+    # 缓存 2: Go 模块（独立缓存避免污染）
     - name: Restore Go Module Cache
       if: github.event.inputs.clean_cache != 'true'
       uses: actions/cache/restore@v4
       with:
         path: openwrt/dl/go-mod-cache
-        key: go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds/packages/net/adguardhome/Makefile', 'openwrt/feeds.conf.default') }}
+        key: go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds/packages/net/*/Makefile') }}
         restore-keys: |
           go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
           
-    - name: Restore Staging Cache
+    # 缓存 3: 工具链和构建工具（最重要）
+    - name: Restore Toolchain Cache
       if: github.event.inputs.clean_cache != 'true'
       uses: actions/cache/restore@v4
       with:
@@ -117,16 +121,18 @@ jobs:
           openwrt/staging_dir/host
           openwrt/staging_dir/hostpkg
           openwrt/staging_dir/toolchain-*
-        key: staging-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.OPENWRT_COMMIT }}
+          openwrt/build_dir/host
+        key: toolchain-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.TOOLCHAIN_HASH }}
         restore-keys: |
-          staging-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
+          toolchain-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
           
+    # 缓存 4: ccache（可选，默认关闭）
     - name: Restore ccache Cache
       if: env.USE_CCACHE == 'true' && github.event.inputs.clean_cache != 'true'
       uses: actions/cache/restore@v4
       with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.KERNEL_HASH }}
+        path: openwrt/.ccache
+        key: ccache-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.OPENWRT_COMMIT }}
         restore-keys: |
           ccache-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
         
@@ -154,6 +160,7 @@ jobs:
     - name: Setup Feeds
       run: |
         cd openwrt
+        echo "📦 更新 Feeds..."
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         
@@ -171,9 +178,9 @@ jobs:
           echo "CONFIG_PACKAGE_luci=y" >> .config
         fi
         
-        # 启用 ccache（如果开启）
+        # 根据选项启用 ccache
         if [ "$USE_CCACHE" = "true" ]; then
-          echo "🚀 启用 ccache 加速编译"
+          echo "🚀 启用 ccache"
           echo "CONFIG_CCACHE=y" >> .config
         fi
         
@@ -183,38 +190,40 @@ jobs:
       if: env.USE_CCACHE == 'true'
       run: |
         cd openwrt
+        export CCACHE_DIR="$PWD/.ccache"
         mkdir -p "$CCACHE_DIR"
         
-        # ccache 配置优化
-        export CCACHE_DIR="$CCACHE_DIR"
         ccache --set-config=max_size=2G
         ccache --set-config=compression=true
         ccache --set-config=compression_level=6
         
-        echo "📊 ccache 状态:"
+        echo "📊 ccache 配置:"
         ccache -s || true
         
-    - name: Verify Cache Integrity
+    - name: Verify and Clean Cache Integrity
       run: |
         cd openwrt
         echo "🔍 检查缓存完整性..."
         
-        # 检查并清理损坏的 Go 模块缓存
+        # 清理损坏的 Go 模块缓存
         if [ -d "dl/go-mod-cache" ]; then
-          echo "✅ Go 模块缓存存在"
-          if find dl/go-mod-cache -name "*.partial" -o -name "*.tmp" | grep -q .; then
-            echo "⚠️ 发现损坏的缓存文件，清理中..."
+          echo "✅ Go 模块缓存存在: $(du -sh dl/go-mod-cache | cut -f1)"
+          
+          # 检查损坏标志
+          CORRUPTED=$(find dl/go-mod-cache -name "*.partial" -o -name "*.tmp" -o -name "*.lock" 2>/dev/null | wc -l)
+          if [ "$CORRUPTED" -gt 0 ]; then
+            echo "⚠️ 发现 $CORRUPTED 个损坏文件，清理 Go 缓存"
             rm -rf dl/go-mod-cache
           fi
         fi
         
-        # 清理临时构建缓存
+        # 清理临时目录
         rm -rf tmp/go-build 2>/dev/null || true
+        rm -rf tmp/.pkginfo 2>/dev/null || true
         
-        # 检查 staging_dir 权限
+        # 验证 staging_dir 权限（避免权限问题）
         if [ -d "staging_dir" ]; then
-          echo "✅ staging_dir 存在，检查权限..."
-          find staging_dir -type d -exec chmod 755 {} \; 2>/dev/null || true
+          find staging_dir -type d ! -perm -755 -exec chmod 755 {} \; 2>/dev/null || true
         fi
         
     - name: Download Dependencies
@@ -222,51 +231,82 @@ jobs:
         cd openwrt
         echo "📥 下载依赖包..."
         
-        # 第一次尝试并行下载
-        if ! make download -j$(nproc) V=s; then
-          echo "⚠️ 并行下载失败，使用单线程重试..."
+        # 首次尝试并行下载
+        if make download -j$(nproc) V=s 2>&1 | tee download.log; then
+          echo "✅ 并行下载成功"
+        else
+          echo "⚠️ 并行下载失败，检查错误..."
+          
+          # 检查是否是 Go 模块问题
+          if grep -q "no required module provides package" download.log; then
+            echo "🔧 检测到 Go 模块问题，清理后重试..."
+            rm -rf dl/go-mod-cache
+          fi
+          
+          echo "🔄 使用单线程重试..."
           make download -j1 V=s
         fi
         
-        # 清理小于 1KB 的文件（下载失败的占位符）
+        # 清理下载失败的占位符
         find dl -size -1024c -exec rm -f {} \;
         
-        # 验证关键依赖
-        echo "📊 下载目录统计:"
-        du -sh dl/* 2>/dev/null | sort -h || true
+        # 统计信息
+        echo ""
+        echo "📊 下载统计:"
+        echo "  总大小: $(du -sh dl 2>/dev/null | cut -f1)"
+        if [ -d "dl/go-mod-cache" ]; then
+          echo "  Go 模块: $(du -sh dl/go-mod-cache | cut -f1) ($(find dl/go-mod-cache -type f | wc -l) 文件)"
+        fi
         
     - name: Build Firmware
       run: |
         cd openwrt
         echo "🔨 开始编译..."
-        echo "📊 编译配置:"
-        echo "  线程数: $(($(nproc) + 1))"
+        echo "📊 配置:"
+        echo "  线程: $(($(nproc) + 1))"
         echo "  ccache: $USE_CCACHE"
         
         # 设置 ccache 环境变量
         if [ "$USE_CCACHE" = "true" ]; then
-          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_DIR="$PWD/.ccache"
           export USE_CCACHE=1
         fi
         
-        # 首次并行编译，失败后单线程详细输出
-        if ! make -j$(($(nproc) + 1)) V=w; then
-          echo "⚠️ 并行编译失败，使用单线程详细模式重试..."
+        # 并行编译，失败后降级
+        START_TIME=$(date +%s)
+        
+        if make -j$(($(nproc) + 1)) V=w 2>&1 | tee build.log; then
+          echo "✅ 并行编译成功"
+        else
+          echo "⚠️ 并行编译失败，分析错误..."
+          
+          # 检查是否是 Go 依赖问题
+          if grep -q "no required module provides package" build.log; then
+            echo "❌ Go 依赖问题，请手动清理缓存后重试"
+            echo "提示: 在 workflow_dispatch 中勾选 'Clean all caches'"
+            exit 1
+          fi
+          
+          echo "🔄 使用单线程详细模式重试..."
           make -j1 V=s
         fi
+        
+        END_TIME=$(date +%s)
+        BUILD_TIME=$((END_TIME - START_TIME))
+        echo "⏱️ 编译耗时: $((BUILD_TIME / 60)) 分 $((BUILD_TIME % 60)) 秒"
         
     - name: Show Build Stats
       if: always()
       run: |
         cd openwrt
-        echo "📊 构建统计信息:"
-        echo "----------------------------------------"
+        echo "=========================================="
+        echo "📊 构建统计"
+        echo "=========================================="
         
-        # 目录大小
-        echo "📦 各目录大小:"
-        du -sh build_dir dl staging_dir tmp bin 2>/dev/null || true
+        echo ""
+        echo "📦 目录大小:"
+        du -sh dl staging_dir build_dir tmp bin 2>/dev/null | sort -h || true
         
-        # Go 模块缓存
         if [ -d "dl/go-mod-cache" ]; then
           echo ""
           echo "📦 Go 模块缓存:"
@@ -274,23 +314,26 @@ jobs:
           echo "  文件数: $(find dl/go-mod-cache -type f | wc -l)"
         fi
         
-        # ccache 统计
-        if [ "$USE_CCACHE" = "true" ] && [ -d "$CCACHE_DIR" ]; then
+        if [ "$USE_CCACHE" = "true" ] && [ -d ".ccache" ]; then
           echo ""
           echo "📦 ccache 统计:"
-          export CCACHE_DIR="$CCACHE_DIR"
-          ccache -s
+          export CCACHE_DIR="$PWD/.ccache"
+          ccache -s 2>/dev/null || echo "ccache 统计失败"
         fi
         
         echo ""
         echo "💾 磁盘使用:"
-        df -h
+        df -h | grep -E '(Filesystem|/dev/root)'
+        echo "=========================================="
         
+    # 仅构建成功时保存缓存
     - name: Save DL Cache
       uses: actions/cache/save@v4
       if: success() && github.event.inputs.clean_cache != 'true'
       with:
-        path: openwrt/dl
+        path: |
+          openwrt/dl
+          !openwrt/dl/go-mod-cache
         key: dl-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds.conf.default') }}
         
     - name: Save Go Module Cache
@@ -298,9 +341,9 @@ jobs:
       if: success() && github.event.inputs.clean_cache != 'true'
       with:
         path: openwrt/dl/go-mod-cache
-        key: go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds/packages/net/adguardhome/Makefile', 'openwrt/feeds.conf.default') }}
+        key: go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds/packages/net/*/Makefile') }}
         
-    - name: Save Staging Cache
+    - name: Save Toolchain Cache
       uses: actions/cache/save@v4
       if: success() && github.event.inputs.clean_cache != 'true'
       with:
@@ -308,14 +351,15 @@ jobs:
           openwrt/staging_dir/host
           openwrt/staging_dir/hostpkg
           openwrt/staging_dir/toolchain-*
-        key: staging-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.OPENWRT_COMMIT }}
+          openwrt/build_dir/host
+        key: toolchain-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.TOOLCHAIN_HASH }}
         
     - name: Save ccache Cache
       uses: actions/cache/save@v4
       if: success() && env.USE_CCACHE == 'true' && github.event.inputs.clean_cache != 'true'
       with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.KERNEL_HASH }}
+        path: openwrt/.ccache
+        key: ccache-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.OPENWRT_COMMIT }}
         
     - name: Organize Firmware
       if: env.UPLOAD_FIRMWARE == 'true'
