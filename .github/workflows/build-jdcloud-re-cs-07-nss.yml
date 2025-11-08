@@ -30,6 +30,8 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+  # 缓存版本号 - 如果依赖出问题可以手动修改此版本号强制刷新缓存
+  CACHE_VERSION: v1
 
 jobs:
   build:
@@ -67,15 +69,23 @@ jobs:
         echo "✅ 源码信息:"
         echo "  分支: $(git branch --show-current)"
         echo "  提交: $(git log -1 --oneline)"
+        echo "OPENWRT_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
         
     - name: Restore DL Cache
       uses: actions/cache/restore@v4
       with:
         path: openwrt/dl
-        key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        key: dl-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds.conf.default') }}
         restore-keys: |
-          dl-${{ env.REPO_BRANCH }}-
-          dl-
+          dl-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
+          
+    - name: Restore Go Module Cache
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/dl/go-mod-cache
+        key: go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds/packages/net/adguardhome/Makefile') }}
+        restore-keys: |
+          go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
           
     - name: Restore Staging Cache
       uses: actions/cache/restore@v4
@@ -84,10 +94,9 @@ jobs:
           openwrt/staging_dir/host
           openwrt/staging_dir/hostpkg
           openwrt/staging_dir/toolchain-*
-        key: staging-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/include/version.mk') }}
+        key: staging-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.OPENWRT_COMMIT }}
         restore-keys: |
-          staging-${{ env.REPO_BRANCH }}-
-          staging-
+          staging-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-
         
     - name: Push Source to Porting Branch
       run: |
@@ -131,18 +140,57 @@ jobs:
         fi
         make defconfig
         
+    - name: Verify Go Module Cache Integrity
+      run: |
+        cd openwrt
+        echo "🔍 检查 Go 模块缓存完整性..."
+        
+        # 如果 go-mod-cache 存在但损坏，则清理
+        if [ -d "dl/go-mod-cache" ]; then
+          echo "检测到现有 Go 模块缓存"
+          
+          # 检查缓存是否损坏（查找常见损坏标志）
+          if find dl/go-mod-cache -name "*.partial" -o -name "*.tmp" | grep -q .; then
+            echo "⚠️ 发现损坏的缓存文件，清理中..."
+            rm -rf dl/go-mod-cache
+          else
+            echo "✅ Go 模块缓存看起来完整"
+          fi
+        fi
+        
+        # 清理可能的临时构建缓存
+        rm -rf tmp/go-build
+        
     - name: Download Dependencies
       run: |
         cd openwrt
         echo "📥 下载依赖包..."
-        make download -j$(nproc) V=s
-        find dl -size -1024c -delete
+        
+        # 第一次尝试并行下载
+        if ! make download -j$(nproc) V=s; then
+          echo "⚠️ 并行下载失败，使用单线程重试..."
+          make download -j1 V=s
+        fi
+        
+        # 清理小于 1KB 的文件（通常是下载失败的占位符）
+        find dl -size -1024c -exec rm -f {} \;
+        
+        # 验证关键 Go 模块是否下载完整
+        if [ -d "dl/go-mod-cache" ]; then
+          echo "✅ Go 模块缓存目录大小: $(du -sh dl/go-mod-cache | cut -f1)"
+        fi
         
     - name: Build Firmware
       run: |
         cd openwrt
         echo "🔨 开始编译..."
-        make -j$(($(nproc) + 1)) || make -j1 V=s
+        echo "使用 $(($(nproc) + 1)) 个线程..."
+        
+        # 并行编译，失败后单线程详细输出
+        if ! make -j$(($(nproc) + 1)) V=w; then
+          echo "⚠️ 并行编译失败，使用单线程详细模式重试..."
+          make -j1 V=s
+        fi
         
     - name: Show Build Stats
       if: always()
@@ -150,25 +198,38 @@ jobs:
         cd openwrt
         echo "📊 构建目录大小:"
         du -sh build_dir dl staging_dir tmp bin 2>/dev/null || true
+        
+        if [ -d "dl/go-mod-cache" ]; then
+          echo "📊 Go 模块缓存大小: $(du -sh dl/go-mod-cache | cut -f1)"
+          echo "📊 Go 模块数量: $(find dl/go-mod-cache -type f | wc -l)"
+        fi
+        
         echo "📊 磁盘使用:"
         df -h
         
     - name: Save DL Cache
       uses: actions/cache/save@v4
-      if: always()
+      if: success()
       with:
         path: openwrt/dl
-        key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        key: dl-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        
+    - name: Save Go Module Cache
+      uses: actions/cache/save@v4
+      if: success()
+      with:
+        path: openwrt/dl/go-mod-cache
+        key: go-mod-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ hashFiles('openwrt/feeds/packages/net/adguardhome/Makefile') }}
         
     - name: Save Staging Cache
       uses: actions/cache/save@v4
-      if: always()
+      if: success()
       with:
         path: |
           openwrt/staging_dir/host
           openwrt/staging_dir/hostpkg
           openwrt/staging_dir/toolchain-*
-        key: staging-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/include/version.mk') }}
+        key: staging-${{ env.REPO_BRANCH }}-${{ env.CACHE_VERSION }}-${{ env.OPENWRT_COMMIT }}
         
     - name: Organize Firmware
       if: env.UPLOAD_FIRMWARE == 'true'
